@@ -5,8 +5,11 @@ A Python-based pipeline that transcribes and summarizes meetings using speech-to
 Features
 
 -Converts meeting audio into text using OpenAI Whisper (CPU/GPU fallback supported).
+
 -Summarizes long transcripts into concise notes using NLP techniques.
+
 -Memory-efficient and easily configurable for local environments.
+
 -Supports multiple audio formats via ffmpeg.
 
 Installation
@@ -34,5 +37,7 @@ FFmpeg
 Notes
 
 -GPU acceleration is supported but optional.
+
 -Ensure ffmpeg is installed and available in your system PATH.
+
 -Works best with clean audio for accurate transcription.
