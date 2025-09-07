@@ -36,9 +36,11 @@ summarizer = pipeline("summarization", model="t5-small")
 # --- Audio capture parameters ---
 RATE = 16000       # Whisper expects 16 kHz audio
 CHANNELS = 1
+device_id = [2,6] #input + output audio device id's
 full_text = []
 space_held = False
 recorded_frames = []
+sys_frames = []
 
 def on_pressed(key):
     global space_held
@@ -62,18 +64,22 @@ def callback(indata, frames, time, status):
     if space_held:
         recorded_frames.append(indata.copy())
 
+def sys_callback(indata, frames, time, status):
+    if status:
+        print("audio status:",status)
+    sys_frames.append(indata.copy())
+
 # --- start keyboard listner --- 
 listener = keyboard.Listener(on_press=on_pressed, on_release=on_released)
 listener.start()
 
 
 # --- Start streaming from microphone ---
-#TODO: 0) start infinite loop
-#      1) Check button press
-#      2) Stream audio until release
 
-with sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=callback):
-    print("Hold SPACE to record, ESC to quit")
+with sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=callback), \
+     sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=sys_callback):
+
+    print("Hold SPACE to record mic, ESC to quit. System audio recording always on.")
     try:
         while listener.running:
             sd.sleep(100)
@@ -90,9 +96,18 @@ if recorded_frames:
     print("Full transcription:", result["text"])
     full_text.append(result["text"])
 else:
-    print("No audio recorded")
+    print("No input audio recorded")
 
-# --- Generate LLaMA output after speech ---
+if sys_frames:
+    out_audio_data  = np.concatenate(sys_frames, axis=0).astype(np.float32).flatten()
+    result = whisper_pipe(out_audio_data, chunk_length_s=None)  # process full output audio
+    print("System audio transcription:", result["text"])
+    full_text.append(result["text"])
+else:
+    print("No output audio recorded")
+
+
+# --- Generate summary output after recording audio ---
 final_transcript = " ".join(full_text)
 
 prompt = f"Summarize this text into two sentences\n {final_transcript}"
