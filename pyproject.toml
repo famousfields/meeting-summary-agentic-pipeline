@@ -16,6 +16,7 @@ sentencepiece = "^0.2.1"
 accelerate = "^1.10.1"
 pynput = "^1.8.1"
 pyannote-audio = "^3.3.2"
+python-dotenv = "^1.1.1"
 
 [tool.poetry.dev-dependencies]
 
