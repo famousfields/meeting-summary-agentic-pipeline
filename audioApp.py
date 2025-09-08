@@ -7,11 +7,13 @@ from pynput import keyboard
 import time 
 from pyannote.audio import Pipeline as DiarizationPipeline
 import os
+from dotenv import load_dotenv
 import soundfile as sf
 
 # --- Device Setup ---
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+load_dotenv() 
 token = os.getenv("HF_TOKEN")
 
 # --- Whisper Setup ---
@@ -65,13 +67,13 @@ def on_released(key):
         return False
 
 
-def callback(indata, frames, time, status):
+def callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
     if space_held:
         recorded_frames.append((time.time(),indata.copy()))
 
-def sys_callback(indata, frames, time, status):
+def sys_callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
     sys_frames.append((time.time(),indata.copy()))
