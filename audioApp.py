@@ -81,7 +81,7 @@ listener = keyboard.Listener(on_press=on_pressed, on_release=on_released)
 listener.start()
 
 
-# --- Start streaming from microphone ---
+# --- Start audio capture from microphone + system output ---
 
 with sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=callback), \
      sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=sys_callback):
@@ -110,6 +110,8 @@ diarization = DiarizationPipeline.from_pretrained(
 #--- Run Diarization ---
 diarization_result = diarization("merged_audio.wav")
 segments = []
+
+##### --------------- TODO: Use whisper model with timestamp("speaker A said ... at {time}")
 for turn, _, speaker in diarization_result.itertracks(yield_label=True):
     # Approximate splitting: divide transcript text proportionally
     # Here we just use the full transcript for every segment
