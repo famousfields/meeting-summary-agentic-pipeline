@@ -1,14 +1,15 @@
 #Install Torch CPU and ffmpeg
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline as hf_pipeline, AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline as hf_pipeline, AutoTokenizer, AutoModelForCausalLM#imports models from huggingface
 import numpy as np
-import sounddevice as sd
-from pynput import keyboard
+import sounddevice as sd#allows access to microphone and does something with recorded audio
+from pynput import keyboard#gets keyboard inputs
 import time 
-from pyannote.audio import Pipeline as DiarizationPipeline
+from pyannote.audio import Pipeline as DiarizationPipeline#package to segment speakers from audio file
 import os
-from dotenv import load_dotenv
-import soundfile as sf
+from dotenv import load_dotenv#hides authentication tokens
+import soundfile as sf#create and store sound file from 1D float32 audio array
+import librosa #package to resample audio files to a specific sample rate
 
 # --- Device Setup ---
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -38,10 +39,9 @@ whisper_pipe = hf_pipeline(
     device=device,
 )
 
-# --- Summarize text-generation pipeline ---
+# --- Summarized text-generation pipeline ---
 from transformers import pipeline
  
-summarizer = pipeline("summarization", model="t5-small")
 # --- Audio capture parameters ---
 RATE = 16000       # Whisper expects 16 kHz audio
 CHANNELS = 1
@@ -66,17 +66,20 @@ def on_released(key):
     if key == keyboard.Key.esc:
         return False
 
-
+#--mic audio only
 def callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
     if space_held:
-        recorded_frames.append((time.time(),indata.copy()))
+        recorded_frames.append(indata.copy())
+        
 
+#-- output audio only
 def sys_callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
-    sys_frames.append((time.time(),indata.copy()))
+    if not space_held:
+        sys_frames.append(indata.copy())
 
 # --- start keyboard listner --- 
 listener = keyboard.Listener(on_press=on_pressed, on_release=on_released)
@@ -84,9 +87,14 @@ listener.start()
 
 
 # --- Start audio capture from microphone + system output ---
+mic_info = sd.query_devices(2)  # your microphone
+mic_rate = int(mic_info['default_samplerate'])
 
-with sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=callback), \
-     sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=sys_callback):
+sys_info = sd.query_devices(6)  # your system audio device
+sys_rate = int(sys_info['default_samplerate'])
+
+with sd.InputStream(device = 2,channels=CHANNELS,samplerate=mic_rate, callback=callback), \
+     sd.InputStream(device = 6,channels=CHANNELS, samplerate =sys_rate, callback=sys_callback):
 
     print("Hold SPACE to record mic, ESC to quit. System audio recording always on.")
     try:
@@ -96,13 +104,48 @@ with sd.InputStream(channels=CHANNELS, samplerate=RATE, callback=callback), \
         print("Exiting...")
 
 # --- concatenate in correct chronological order ---
-all_frames = recorded_frames + sys_frames
-all_frames.sort(key = lambda x:x[0]) #all frames sorted by timestamp
-merged_audio = np.concatenate([f[1] for f in all_frames], axis=0).astype(np.float32).flatten()
-sf.write("merged_audio.wav", merged_audio, RATE)
 
-result = whisper_pipe(merged_audio, chunk_length_s=None)
-full_transcrupt = result["text"]
+#TODO: find a way to ensure callback only captures microphone audio and sys_callback only captures system output audio
+#currently: sys_callback captures both output and input audio
+#next: 1) store audio in 'merged_audio' variable in the order that it is recieved
+#      2) pass 'merged_audio' to diarization pipeline to segment speakers
+# --- Resample audio streams separately ---
+all_chunks = []  # to store all sentence-level chunks
+
+if recorded_frames:
+    mic_audio = np.concatenate(recorded_frames, axis=0).flatten()
+    mic_audio_16k = librosa.resample(mic_audio, orig_sr=mic_rate, target_sr=16000)
+    
+    # Transcribe mic audio
+    mic_result = whisper_pipe(mic_audio_16k, chunk_length_s=None, return_timestamps="sentence")
+    all_chunks.extend(mic_result.get("chunks", []))
+
+if sys_frames:
+    sys_audio = np.concatenate(sys_frames, axis=0).flatten()
+    sys_audio_16k = librosa.resample(sys_audio, orig_sr=sys_rate, target_sr=16000)
+    
+    # Transcribe system audio
+    sys_result = whisper_pipe(sys_audio_16k, chunk_length_s=None, return_timestamps="sentence")
+    # Optional: adjust timestamps if system audio was recorded after mic
+    # For example, add mic duration offset:
+    if recorded_frames:
+        offset = len(mic_audio_16k) / 16000.0  # seconds
+        for chunk in sys_result.get("chunks", []):
+            ts = chunk["timestamp"]
+            if isinstance(ts[0], (list, tuple)):
+                start, end = ts[0]
+            else:
+                start, end = ts
+            chunk["timestamp"] = (start + offset, end + offset)
+    all_chunks.extend(sys_result.get("chunks", []))
+    
+# Optionally merge audio for saving
+merged_audio = np.concatenate(
+    [mic_audio_16k] + ([sys_audio_16k] if sys_frames else [])
+)
+
+
+sf.write("merged_audio.wav", merged_audio, RATE)
 
 diarization = DiarizationPipeline.from_pretrained(
     "pyannote/speaker-diarization", 
@@ -111,23 +154,17 @@ diarization = DiarizationPipeline.from_pretrained(
 
 #--- Run Diarization ---
 diarization_result = diarization("merged_audio.wav")
-segments = []
 
-##### --------------- TODO: Use whisper model with timestamp("speaker A said ... at {time}")
-for turn, _, speaker in diarization_result.itertracks(yield_label=True):
-    # Approximate splitting: divide transcript text proportionally
-    # Here we just use the full transcript for every segment
-    segments.append(f"Speaker {speaker} ({turn.start:.1f}-{turn.end:.1f}s): {full_transcript}")
+# Full transcript from separate chunks
+full_transcript = " ".join([c["text"] for c in all_chunks])
+# --- Align Whisper sentences with diarization speakers ---
+speaker_sentences = []
 
-# --- print segments ---
-for seg in segments:
-    print(seg)
 
 # --- Generate summary output after recording audio ---
-final_transcript = " ".join(full_transcript)
-
-prompt = f"Summarize this text into two sentences\n {final_transcript}"
+# print("final transcript:",full_transcript)
 
 #response = llama_generate(final_transcript)
-summary = summarizer(final_transcript, max_length=50, min_length=15, do_sample=False)
+summarizer = pipeline("summarization", model="t5-small")
+summary = summarizer(full_transcript, max_length=50, min_length=15, do_sample=False)
 print("Summarized Text: ", summary[0]['summary_text'])
