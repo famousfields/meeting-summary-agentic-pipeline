@@ -26,6 +26,9 @@ speech_model = AutoModelForSpeechSeq2Seq.from_pretrained(
     use_safetensors=True
 )
 
+for i, dev in enumerate(sd.query_devices()):
+    print(i, dev['name'], "IN:", dev['max_input_channels'], "OUT:", dev['max_output_channels'])
+
 speech_model.to(device)
 
 processor = AutoProcessor.from_pretrained(model_id)
@@ -67,19 +70,29 @@ def on_released(key):
         return False
 
 #--mic audio only
+all_frames = []
+mic_info = sd.query_devices(2)  # your microphone
+mic_rate = int(mic_info['default_samplerate'])
+
+sys_info = sd.query_devices(4)  # your system audio device
+sys_rate = int(sys_info['default_samplerate'])
+
 def callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
     if space_held:
-        recorded_frames.append(indata.copy())
-        
+        frame = indata.copy().flatten()
+        frame_16k = librosa.resample(frame, orig_sr=mic_rate, target_sr=16000)
+        all_frames.append(frame_16k)
 
 #-- output audio only
 def sys_callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
     if not space_held:
-        sys_frames.append(indata.copy())
+        frame = indata.copy().flatten()
+        frame_16k = librosa.resample(frame, orig_sr=sys_rate, target_sr=16000)
+        all_frames.append(frame_16k)
 
 # --- start keyboard listner --- 
 listener = keyboard.Listener(on_press=on_pressed, on_release=on_released)
@@ -87,14 +100,10 @@ listener.start()
 
 
 # --- Start audio capture from microphone + system output ---
-mic_info = sd.query_devices(2)  # your microphone
-mic_rate = int(mic_info['default_samplerate'])
 
-sys_info = sd.query_devices(6)  # your system audio device
-sys_rate = int(sys_info['default_samplerate'])
 
 with sd.InputStream(device = 2,channels=CHANNELS,samplerate=mic_rate, callback=callback), \
-     sd.InputStream(device = 6,channels=CHANNELS, samplerate =sys_rate, callback=sys_callback):
+     sd.InputStream(device = 4,channels=CHANNELS, samplerate =sys_rate, callback=sys_callback):
 
     print("Hold SPACE to record mic, ESC to quit. System audio recording always on.")
     try:
@@ -111,49 +120,28 @@ with sd.InputStream(device = 2,channels=CHANNELS,samplerate=mic_rate, callback=c
 #      2) pass 'merged_audio' to diarization pipeline to segment speakers
 # --- Resample audio streams separately ---
 all_chunks = []  # to store all sentence-level chunks
-
-if recorded_frames:
-    mic_audio = np.concatenate(recorded_frames, axis=0).flatten()
-    mic_audio_16k = librosa.resample(mic_audio, orig_sr=mic_rate, target_sr=16000)
-    
-    # Transcribe mic audio
-    mic_result = whisper_pipe(mic_audio_16k, chunk_length_s=None, return_timestamps="sentence")
-    all_chunks.extend(mic_result.get("chunks", []))
-
-if sys_frames:
-    sys_audio = np.concatenate(sys_frames, axis=0).flatten()
-    sys_audio_16k = librosa.resample(sys_audio, orig_sr=sys_rate, target_sr=16000)
-    
-    # Transcribe system audio
-    sys_result = whisper_pipe(sys_audio_16k, chunk_length_s=None, return_timestamps="sentence")
-    # Optional: adjust timestamps if system audio was recorded after mic
-    # For example, add mic duration offset:
-    if recorded_frames:
-        offset = len(mic_audio_16k) / 16000.0  # seconds
-        for chunk in sys_result.get("chunks", []):
-            ts = chunk["timestamp"]
-            if isinstance(ts[0], (list, tuple)):
-                start, end = ts[0]
-            else:
-                start, end = ts
-            chunk["timestamp"] = (start + offset, end + offset)
-    all_chunks.extend(sys_result.get("chunks", []))
-    
-# Optionally merge audio for saving
-merged_audio = np.concatenate(
-    [mic_audio_16k] + ([sys_audio_16k] if sys_frames else [])
-)
+all_chunks2 = []
+all_audio = np.concatenate(all_frames, axis=0)
+audio_result =  mic_result = whisper_pipe(all_audio, chunk_length_s=None, return_timestamps="sentence")
+all_chunks.extend(audio_result.get("chunks", []))
+print("Recording RESULT:", audio_result)
 
 
-sf.write("merged_audio.wav", merged_audio, RATE)
+# # Optionally merge audio for saving
+# merged_audio = np.concatenate(
+#     [mic_audio_16k] + ([sys_audio_16k] if sys_frames else [])
+# )
 
-diarization = DiarizationPipeline.from_pretrained(
-    "pyannote/speaker-diarization", 
-    use_auth_token=token
-)
 
-#--- Run Diarization ---
-diarization_result = diarization("merged_audio.wav")
+sf.write("merged_audio.wav", all_audio, RATE)
+
+# diarization = DiarizationPipeline.from_pretrained(
+#     "pyannote/speaker-diarization", 
+#     use_auth_token=token
+# )
+
+# #--- Run Diarization ---
+# diarization_result = diarization("merged_audio.wav")
 
 # Full transcript from separate chunks
 full_transcript = " ".join([c["text"] for c in all_chunks])
