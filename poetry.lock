@@ -3840,6 +3840,22 @@ files = [
 ]
 
 [[package]]
+name = "soundcard"
+version = "0.4.4"
+description = "Play and record audio without resorting to CPython extensions"
+optional = false
+python-versions = ">=3.5"
+groups = ["main"]
+files = [
+    {file = "soundcard-0.4.4-py3-none-any.whl", hash = "sha256:e915dc6d281bbce369cd3ace46f37e07941dbf2ba867bf4677e7a9433fd63657"},
+    {file = "soundcard-0.4.4.tar.gz", hash = "sha256:87df9c4b8ec97585fe440a1d9dbafabcece58eae5857ed005e6bb385b2179cff"},
+]
+
+[package.dependencies]
+cffi = "*"
+numpy = "*"
+
+[[package]]
 name = "sounddevice"
 version = "0.5.2"
 description = "Play and Record Sound with Python"
@@ -4751,4 +4767,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "0414cfe05735c2954153cc920ca6738eb1f936be4e5c394a8391ab4b06bd67d3"
+content-hash = "c83fe69d1e7801d448179fb0509dceb6f0e12122e7b343b98e7be7a1fe8c7343"
