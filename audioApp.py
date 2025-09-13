@@ -6,6 +6,7 @@ import sounddevice as sd#allows access to microphone and does something with rec
 from pynput import keyboard#gets keyboard inputs
 import time 
 from pyannote.audio import Pipeline as DiarizationPipeline#package to segment speakers from audio file
+from pyannote.core import Segment
 import os
 from dotenv import load_dotenv#hides authentication tokens
 import soundfile as sf#create and store sound file from 1D float32 audio array
@@ -124,7 +125,6 @@ all_chunks2 = []
 all_audio = np.concatenate(all_frames, axis=0)
 audio_result =  mic_result = whisper_pipe(all_audio, chunk_length_s=None, return_timestamps="sentence")
 all_chunks.extend(audio_result.get("chunks", []))
-print("Recording RESULT:", audio_result)
 
 
 # # Optionally merge audio for saving
@@ -132,16 +132,35 @@ print("Recording RESULT:", audio_result)
 #     [mic_audio_16k] + ([sys_audio_16k] if sys_frames else [])
 # )
 
-
 sf.write("merged_audio.wav", all_audio, RATE)
 
-# diarization = DiarizationPipeline.from_pretrained(
-#     "pyannote/speaker-diarization", 
-#     use_auth_token=token
-# )
+diarization = DiarizationPipeline.from_pretrained(
+    "pyannote/speaker-diarization", 
+    use_auth_token=token
+)
 
 # #--- Run Diarization ---
-# diarization_result = diarization("merged_audio.wav")
+diarization_result = diarization("merged_audio.wav")
+
+final_transcript = []
+for seg in audio_result["chunks"]:
+    seg_start, seg_end = seg["timestamp"]
+    text = seg["text"]
+    seg_interval = Segment(seg_start, seg_end)
+
+    overlapping = diarization_result.crop(seg_interval)
+    if len(overlapping) > 0:
+        speaker = max(overlapping.itertracks(yield_label=True),
+                      key=lambda x: x[0].duration)[1]
+    else:
+        speaker = "UNKNOWN"
+
+    final_transcript.append((speaker, text))
+# Print
+print("Diarization Segment results:")
+
+for speaker, text in final_transcript:
+    print(f"Speaker {speaker}: {text}")
 
 # Full transcript from separate chunks
 full_transcript = " ".join([c["text"] for c in all_chunks])
