@@ -35,7 +35,7 @@ def record_audio(mic_device, sys_device, mic_rate, sys_rate, channels=1):
             if space_held:
                 frame = indata.copy().flatten()
                 audio_queue.put((time.time(), "mic", frame, mic_rate))
-
+        print("mic rate:", mic_rate)
         with sd.InputStream(device = mic_device,
                             channels=channels,
                             samplerate=mic_rate,
@@ -87,73 +87,40 @@ def merge_audio_queue(audio_queue, target_rate, outfile=None):
     # Sort by timestamp
     all_events.sort(key=lambda x: x[0])  # (timestamp, source, chunk, orig_rate)
 
-    # Resample each chunk to target_rate
-    ordered_audio = []
-    for _, src, chunk, orig_rate in all_events:
-        if orig_rate != target_rate:
-            chunk_resampled = librosa.resample(chunk, orig_sr=orig_rate, target_sr=target_rate)
-        else:
-            chunk_resampled = chunk
-        ordered_audio.append(chunk_resampled)
+    if not all_events:
+        return np.array([]), []
 
-    merged_audio = np.concatenate(ordered_audio, axis=0)
+    # Normalize timestamps to start at 0
+    t0 = all_events[0][0]
+
+    # Convert timestamps → sample indices
+    tracks = []
+    for ts, src, chunk, orig_rate in all_events:
+        # Resample if needed
+        if orig_rate != target_rate:
+            chunk = librosa.resample(chunk, orig_sr=orig_rate, target_sr=target_rate)
+
+        start_sample = int((ts - t0) * target_rate)
+        tracks.append((start_sample, chunk))
+
+    # Figure out how long the final track must be
+    total_len = max(start + len(chunk) for start, chunk in tracks)
+
+    # Create empty buffer
+    mixed_audio = np.zeros(total_len, dtype=np.float32)
+
+    # Add all sources into the buffer (mixing)
+    for start, chunk in tracks:
+        end = start + len(chunk)
+        mixed_audio[start:end] += chunk.astype(np.float32)
+
+    # Normalize to avoid clipping
+    mixed_audio = mixed_audio / np.max(np.abs(mixed_audio) + 1e-9)
 
     if outfile:
-        sf.write(outfile, merged_audio, target_rate)
+        sf.write(outfile, mixed_audio, target_rate)
 
-    return merged_audio, all_events
-
-# def record_audio(mic_device, sys_device, mic_rate, sys_rate, channels=1):
-#     audio_queue = queue.Queue()
-#     space_held = False
-
-#     def on_pressed(key):
-#         nonlocal space_held
-#         if key == keyboard.Key.space:
-#             space_held = True
-
-#     def on_released(key):
-#         nonlocal space_held
-#         if key == keyboard.Key.space:
-#             space_held = False
-#         if key == keyboard.Key.esc:
-#             return False
-
-#     def mic_callback(indata, frames, t_info, status):
-#         if status:
-#             print("mic status:", status)
-#         if space_held:
-#             frame = indata.copy().flatten()
-#             frame_16k = librosa.resample(frame, orig_sr=mic_rate, target_sr=16000)
-#             audio_queue.put((time.time(), "mic", frame_16k))
-
-#     def sys_callback(indata, frames, t_info, status):
-#         if status:
-#             print("sys status:", status)
-#         frame = indata.copy().flatten()
-#         frame_16k = librosa.resample(frame, orig_sr=sys_rate, target_sr=16000)
-#         audio_queue.put((time.time(), "sys", frame_16k))
-
-#     listener = keyboard.Listener(on_press=on_pressed, on_release=on_released)
-#     listener.start()
-
-#     with sd.InputStream(channels=channels, samplerate=mic_rate, callback=mic_callback), \
-#          sd.InputStream(channels=channels, samplerate=sys_rate, callback=sys_callback):
-#         print("Hold SPACE to record mic, ESC to quit. System audio recording always on.")
-#         try:
-#             while listener.running:
-#                 sd.sleep(100)
-#         except KeyboardInterrupt:
-#             print("Exiting...")
-
-#     # Retrieve and sort audio chunks
-#     all_events = []
-#     while not audio_queue.empty():
-#         all_events.append(audio_queue.get())
-#     all_events.sort(key=lambda x: x[0])
-#     ordered_audio = [chunk for _, _, chunk in all_events]
-#     merged_audio = np.concatenate(ordered_audio, axis=0)
-#     return merged_audio
+    return mixed_audio, all_events
 
 # --- Transcription ---
 from transformers import pipeline as hf_pipeline
@@ -196,8 +163,9 @@ def summarize_transcript(transcript_text, model_name="t5-small", max_length=50, 
 
 def main():
     # --- Devices ---
-    mic_device, sys_device = 2, 4
-    mic_rate = int(sd.query_devices(mic_device)['default_samplerate'])
+    mic_device, sys_device = 2,4
+    mic_info = sd.query_devices(2)  # your microphone
+    mic_rate = int(mic_info['default_samplerate'])
     sys_rate = int(sd.query_devices(sys_device)['default_samplerate'])
 
     # --- Record audio ---
@@ -209,7 +177,7 @@ def main():
     #     Save two separate WAVs (mic.wav and sys.wav).
     #     Run diarization on one stream but not the other.
     #     Analyze talk time per source (how much the mic spoke vs. system audio).
-    merged_audio, all_events = merge_audio_queue(audio_queue,target_rate=16000, outfile="merged_audio.wav")
+    merged_audio, all_events = merge_audio_queue(audio_queue, target_rate=16000, outfile="merged_audio.wav")
     
     # --- Load Whisper ---
     whisper_pipe = hf_pipeline(
