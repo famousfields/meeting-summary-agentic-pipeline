@@ -46,7 +46,7 @@ whisper_pipe = hf_pipeline(
 # --- Summarized text-generation pipeline ---
 from transformers import pipeline
  
-# --- Audio capture parameters ---
+# --- Record Audio ---
 RATE = 16000       # Whisper expects 16 kHz audio
 CHANNELS = 1
 device_id = [2,6] #input + output audio device id's
@@ -68,15 +68,11 @@ def on_released(key):
     if key == keyboard.Key.esc:
         return False
 
-#--mic audio only
-all_frames = []
 audio_queue = queue.Queue()
+
+# --- input audio ---
 mic_info = sd.query_devices(2)  # your microphone
 mic_rate = int(mic_info['default_samplerate'])
-
-sys_info = sd.query_devices(4)  # your system audio device
-sys_rate = int(sys_info['default_samplerate'])
-
 def callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
@@ -85,7 +81,9 @@ def callback(indata, frames, t_info, status):
         frame_16k = librosa.resample(frame, orig_sr=mic_rate, target_sr=16000)
         audio_queue.put((time.time(), "mic", frame_16k))
 
-#-- output audio only
+# --- output audio ---
+sys_info = sd.query_devices(4)  # your system audio device
+sys_rate = int(sys_info['default_samplerate'])
 def sys_callback(indata, frames, t_info, status):
     if status:
         print("audio status:",status)
@@ -100,7 +98,6 @@ listener = keyboard.Listener(on_press=on_pressed, on_release=on_released)
 listener.start()
 
 # --- Start audio capture from microphone + system output ---
-
 with sd.InputStream(channels=CHANNELS,samplerate=mic_rate, callback=callback), \
      sd.InputStream(channels=CHANNELS, samplerate =sys_rate, callback=sys_callback):
 
@@ -112,37 +109,29 @@ with sd.InputStream(channels=CHANNELS,samplerate=mic_rate, callback=callback), \
         print("Exiting...")
 
 # --- concatenate in correct chronological order ---
-
-#TODO: find a way to ensure callback only captures microphone audio and sys_callback only captures system output audio
-#currently: sys_callback captures both output and input audio
-#next: 1) store audio in 'merged_audio' variable in the order that it is recieved
-#      2) pass 'merged_audio' to diarization pipeline to segment speakers
-# --- Resample audio streams separately ---
-
 all_events = []
 
 while not audio_queue.empty():
     all_events.append(audio_queue.get())
 
-# Sort by timestamp to preserve order
 all_events.sort(key=lambda x: x[0])
 
-# Now reconstruct in chronological order
+# --- Now reconstruct in chronological order ---
 ordered_audio = [chunk for _, _, chunk in all_events]
 merged_audio = np.concatenate(ordered_audio, axis=0)
 
 audio_result  = whisper_pipe(merged_audio, chunk_length_s =None, return_timestamps = "sentence")
 sf.write("merged_audio.wav", merged_audio, RATE)
-print(audio_result)
 
 diarization = DiarizationPipeline.from_pretrained(
     "pyannote/speaker-diarization", 
     use_auth_token=token
 )
 
-# # #--- Run Diarization ---
+#---Run Diarization---
 diarization_result = diarization("merged_audio.wav")
 
+# --- Align Whisper sentences with diarization speakers ---
 final_transcript = []
 for seg in audio_result["chunks"]:
     seg_start, seg_end = seg["timestamp"]
@@ -157,21 +146,13 @@ for seg in audio_result["chunks"]:
         speaker = "UNKNOWN"
 
     final_transcript.append((speaker, text))
-# Print
-print("Diarization Segment results:")
 
-for speaker, text in final_transcript:
-    print(f"Speaker {speaker}: {text}")
-
-# Full transcript from separate chunks
+# --- Full transcript from separate chunks ---
 full_transcript = " ".join(text for speaker, text in final_transcript)
-# --- Align Whisper sentences with diarization speakers ---
-speaker_sentences = []
 
 # --- Generate summary output after recording audio ---
 print("final transcript:",full_transcript)
 
-#response = llama_generate(final_transcript)
 summarizer = pipeline("summarization", model="t5-small")
 summary = summarizer(full_transcript, max_length=50, min_length=15, do_sample=False)
 print("Summarized Text: ", summary[0]['summary_text'])
