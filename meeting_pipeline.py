@@ -64,6 +64,13 @@ def record_audio(mic_device, sys_device, mic_rate, sys_rate, channels=1):
     t1.join(); t2.join(); listener.stop()
     return audio_queue
 
+#--- Remove Noise from audio --- 
+import noisereduce as nr
+def denoise_chunk(chunk, rate):
+    # Estimate noise from the first 0.5s or a quiet section
+    noise_sample = chunk[:int(rate * 0.5)]
+    reduced = nr.reduce_noise(y=chunk, sr=rate, y_noise=noise_sample)
+    return reduced
 
 # --- Save separate tracks + optional merged ---
 def process_audio_queue(audio_queue, target_rate=16000):
@@ -86,6 +93,8 @@ def process_audio_queue(audio_queue, target_rate=16000):
         start_sample = int((ts - t0) * target_rate)
         tracks.append((start_sample, chunk))
 
+    chunk = denoise_chunk(chunk,target_rate)
+    
     total_len = max(start + len(chunk) for start, chunk in tracks)
     mixed_audio = np.zeros(total_len, dtype=np.float32)
 
@@ -113,18 +122,24 @@ def diarize_audio(file_path, token):
     )
     return diarization(file_path)
 
-
 # --- Align speakers ---
 def align_speakers(audio_chunks, diarization_result):
     final_transcript = []
     for seg in audio_chunks["chunks"]:
-        seg_start, seg_end = seg["timestamp"]
+        seg_start, seg_end = seg.get("timestamp", (None, None))
         text = seg["text"]
+
+        # Skip invalid segments
+        if seg_start is None or seg_end is None:
+            continue  
+
         seg_interval = Segment(seg_start, seg_end)
         overlapping = diarization_result.crop(seg_interval)
+
         speaker = "UNKNOWN"
         if len(overlapping) > 0:
-            speaker = max(overlapping.itertracks(yield_label=True), key=lambda x: x[0].duration)[1]
+            speaker = max(overlapping.itertracks(yield_label=True), 
+                          key=lambda x: x[0].duration)[1]
         final_transcript.append((speaker, text))
     return final_transcript
 
@@ -141,6 +156,19 @@ def remap_speakers(final_transcript):
         remapped.append((speaker_map.get(speaker, "UNKNOWN"), text))
     
     return remapped
+
+import re 
+action_verbs = [
+    "need", "decide", "assign", "do", "complete", "implement", 
+    "follow up", "prepare", "approve", "confirm", "should", "must"
+]
+def extract_action_items(transcript_text):
+    sentences = re.split(r'[.!?]\s+', transcript_text)
+    action_items = []
+    for sentence in sentences:
+        if any(verb in sentence.lower() for verb in action_verbs):
+            action_items.append(sentence.strip())
+    return action_items
 
 # --- Summarize ---
 from transformers import pipeline
@@ -172,7 +200,7 @@ def main():
     # --- Load Whisper ---
     whisper_pipe = hf_pipeline(
         "automatic-speech-recognition",
-        model="openai/whisper-base",
+        model="openai/whisper-small",
         device="cuda:0" if torch.cuda.is_available() else "cpu"
     )
 
@@ -194,10 +222,12 @@ def main():
     full_transcript = " ".join(text for _, text in final_transcript)
     print("Transcript:", full_transcript)
 
+    full_meaningful_transcript = extract_action_items(full_transcript)
+    print(full_meaningful_transcript)
+
     # --- Summarize ---
     summary_text = summarize_transcript(full_transcript)
     print("Summary:", summary_text)
-
 
 if __name__ == "__main__":
     main()
